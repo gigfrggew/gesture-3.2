@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">My Application 1</string>
+    <string name="accessibility_service_description">Allows Gestura to perform screen actions via hand gestures.</string>
+</resources>
