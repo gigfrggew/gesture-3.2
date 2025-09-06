@@ -1,4 +1,19 @@
 <resources>
-    <string name="app_name">My Application 1</string>
+    <string name="app_name">Gestura</string>
+    <string name="app_description">Control your device with hand gestures</string>
+    <string name="accessibility_service_label">Gestura Accessibility Service</string>
     <string name="accessibility_service_description">Allows Gestura to perform screen actions via hand gestures.</string>
+    <string name="start_gesture_control">Start Gesture Control</string>
+    <string name="grant_all_permissions">Grant All Permissions</string>
+    <string name="permission_camera">Camera</string>
+    <string name="permission_overlay">Draw Over Other Apps</string>
+    <string name="permission_accessibility">Accessibility</string>
+    <string name="permission_notifications">Notifications</string>
+    <string name="permission_camera_desc">For hand gesture detection</string>
+    <string name="permission_overlay_desc">To show the gesture cursor</string>
+    <string name="permission_accessibility_desc">To perform actions like launching apps</string>
+    <string name="permission_notifications_desc">Required for background services</string>
+    <string name="permission_granted">✓ Granted</string>
+    <string name="grant">Grant</string>
+    <string name="debug_scan">Debug Scan</string>
 </resources>

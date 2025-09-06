@@ -1,8 +1,9 @@
-// MainActivity.kt
+
 package com.example.myapplication1
 
 import android.Manifest
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,8 @@ import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityManager
@@ -127,11 +130,19 @@ class MainActivity : ComponentActivity() {
     }
 
     // Use the Activity's registerReceiver for simpler semantics and track registration
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private fun registerServiceStatusReceiver() {
         try {
             val filter = IntentFilter("com.example.myapplication1.CAMERA_SERVICE_STATUS")
-            registerReceiver(serviceStatusReceiver, filter)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(serviceStatusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                // Use the older, deprecated method for versions before Android 13
+                @Suppress("DEPRECATION")
+                registerReceiver(serviceStatusReceiver, filter)
+            }
             isReceiverRegistered = true
+            Log.d("MainActivity", "Service status receiver registered successfully.")
         } catch (e: Exception) {
             Log.w("MainActivity", "Failed to register service status receiver: ${e.message}", e)
             isReceiverRegistered = false
@@ -246,19 +257,29 @@ class MainActivity : ComponentActivity() {
             return
         }
         try {
+            Log.d("MainActivity", "Starting services...")
+            
             // Start OverlayService first as CameraService depends on it
             val overlayIntent = Intent(this, OverlayService::class.java)
             ContextCompat.startForegroundService(this, overlayIntent)
+            Log.d("MainActivity", "OverlayService start requested")
 
-            // CameraService has its own startForeground call
-            val cameraIntent = Intent(this, CameraService::class.java)
-            ContextCompat.startForegroundService(this, cameraIntent)
+            // Wait a moment for OverlayService to initialize before starting CameraService
+            Handler(Looper.getMainLooper()).postDelayed({
+                try {
+                    val cameraIntent = Intent(this@MainActivity, CameraService::class.java)
+                    ContextCompat.startForegroundService(this@MainActivity, cameraIntent)
+                    Log.d("MainActivity", "CameraService start requested")
+                    
+                    Toast.makeText(this@MainActivity, "Gestura service started!", Toast.LENGTH_SHORT).show()
 
-            Log.d("MainActivity", "Services started")
-            Toast.makeText(this, "Gestura service started!", Toast.LENGTH_SHORT).show()
-
-            // Transition to Home so gesture browsing starts over the launcher
-            GestureAccessibilityService.instance?.goHome()
+                    // Transition to Home so gesture browsing starts over the launcher
+                    GestureAccessibilityService.instance?.goHome()
+                } catch (e: Exception) {
+                    Log.e("MainActivity", "Failed to start CameraService", e)
+                    Toast.makeText(this@MainActivity, "Failed to start camera service. Please try again.", Toast.LENGTH_LONG).show()
+                }
+            }, 2000) // Wait 2 seconds for OverlayService to initialize
 
         } catch (e: Exception) {
             Log.e("MainActivity", "Failed to start services", e)

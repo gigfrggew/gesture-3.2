@@ -1,0 +1,56 @@
+# ===================================================================
+#
+# 	Standard Android Studio .gitignore file
+#
+# ===================================================================
+
+
+# Build files and folders
+# -------------------------
+build/
+*/build/
+captures/
+
+# Local configuration files (IMPORTANT for security)
+# ----------------------------------------------------
+local.properties
+.idea/workspace.xml
+.idea/libraries/
+.idea/navEditor.xml
+
+# IDE-specific files and folders
+# --------------------------------
+*.iml
+.idea/
+.DS_Store
+
+# Gradle files
+# ------------
+.gradle/
+gradle.properties
+
+# Generated files
+# ---------------
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+
+# Keystore files (IMPORTANT for security)
+# ---------------------------------------
+*.jks
+*.keystore
+
+# Google Services (if you add them locally)
+# -----------------------------------------
+google-services.json
+
+# Log files
+# ---------
+*.log
+
+# C/C++ generated files
+# ---------------------
+.cxx/
+*/.cxx/

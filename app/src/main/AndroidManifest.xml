@@ -66,6 +66,7 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
+        <activity android:name=".activity.OverlaySettingsActivity" />
     </application>
 
 </manifest>

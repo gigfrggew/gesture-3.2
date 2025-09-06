@@ -6,4 +6,4 @@
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="true"
     android:canRequestFilterKeyEvents="false"
-    android:settingsActivity="" />
+    android:canRequestEnhancedWebAccessibility="false" />

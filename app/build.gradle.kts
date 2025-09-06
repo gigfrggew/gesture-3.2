@@ -1,11 +1,25 @@
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
+    alias(libs.plugins.compose.compiler)
+}
+
+// Top-level kotlin block – NOT inside android {}
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_11)
+        languageVersion.set(KotlinVersion.KOTLIN_2_0)
+        apiVersion.set(KotlinVersion.KOTLIN_2_0)
+        freeCompilerArgs.add("-Xjsr305=strict")
+    }
 }
 
 android {
     namespace = "com.example.myapplication1"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.myapplication1"
@@ -14,7 +28,12 @@ android {
         versionCode = 1
         versionName = "1.0"
 
+        multiDexEnabled = true
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+        }
     }
 
     buildTypes {
@@ -25,43 +44,81 @@ android {
                 "proguard-rules.pro"
             )
         }
+        debug {
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android.txt"),
+                "proguard-rules.pro"
+            )
+        }
     }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    kotlinOptions {
-        jvmTarget = "11"
-    }
+
+    // ✅ REMOVE this deprecated block
+    // kotlinOptions {
+    //     jvmTarget = "11"
+    // }
+
     buildFeatures {
         compose = true
     }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.10"
-    }
+
     lint {
         baseline = file("lint-baseline.xml")
         abortOnError = false
     }
-    aaptOptions {
-        // Keep your .task model file uncompressed
+
+    androidResources {
         noCompress += ".task"
+    }
+    
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/DEPENDENCIES"
+            excludes += "/META-INF/LICENSE"
+            excludes += "/META-INF/LICENSE.txt"
+            excludes += "/META-INF/license.txt"
+            excludes += "/META-INF/NOTICE"
+            excludes += "/META-INF/NOTICE.txt"
+            excludes += "/META-INF/notice.txt"
+            excludes += "/META-INF/ASL2.0"
+        }
     }
 }
 
+// Clean tasks
+tasks.register("cleanBuildCache") {
+    doLast {
+        delete(fileTree("build/tmp") { include("**/*.class") })
+        delete("build/tmp/kotlin-classes")
+        delete("build/intermediates/dex")
+        delete("build/intermediates/javac")
+    }
+}
+
+tasks.named("clean") {
+    dependsOn("cleanBuildCache")
+}
+
 dependencies {
-    // Core Android dependencies
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.appcompat)
+    implementation(libs.androidx.multidex)
 
-    // Kotlin Logging (if you need)
+    implementation(libs.androidx.constraintlayout)
+    implementation(libs.material)
+
     implementation(libs.kotlin.logging)
     implementation(libs.slf4j.android)
 
-    // Compose dependencies
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
@@ -74,8 +131,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.viewmodel.savedstate)
-    implementation(libs.ui)
-    implementation(libs.ui.tooling)
+    implementation(libs.androidx.lifecycle.service)
     implementation(libs.androidx.foundation)
     implementation(libs.androidx.savedstate)
 
@@ -84,30 +140,19 @@ dependencies {
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.ui.test.junit4)
 
-    // CameraX dependencies
     implementation(libs.androidx.camera.core.v130)
     implementation(libs.androidx.camera.camera2.v130)
     implementation(libs.androidx.camera.lifecycle.v130)
     implementation(libs.androidx.camera.view.v130)
 
-    // MediaPipe and TensorFlow Lite dependencies
     implementation(libs.tasks.vision.v020230731)
     implementation(libs.tensorflow.lite)
 
-    // Coroutines
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.play.services)
     implementation(libs.kotlinx.coroutines.core)
 
-    // Lifecycle components (keep only what you need)
-    implementation(libs.androidx.lifecycle.service)
-    implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.androidx.lifecycle.common)
-
-    // Testing dependencies
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
-
-    
 }

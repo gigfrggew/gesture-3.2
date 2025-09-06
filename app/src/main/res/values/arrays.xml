@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="marker_count_options">
+        <item>2 Markers</item>
+        <item>4 Markers</item>
+        <item>5 Markers</item>
+        <item>6 Markers</item>
+        <item>8 Markers</item>
+        <item>10 Markers</item>
+    </string-array>
+</resources>
+
+
