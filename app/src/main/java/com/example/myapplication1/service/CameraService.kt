@@ -25,6 +25,10 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import com.example.myapplication1.R
+import android.widget.Toast
+import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
+import org.tensorflow.lite.support.common.FileUtil
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.MPImage
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
@@ -59,6 +63,15 @@ class CameraService : LifecycleService() {
     private val HAND_LOST_TIMEOUT = 2000L // Reduced timeout
     private var isServiceBound = false
     private var frameCount = 0
+
+    // TFLite gesture classifier
+    private var gestureInterpreter: Interpreter? = null
+    private var gestureLabels: List<String> = listOf("Open Palm", "OK", "Thumb Right", "Thumb Left")
+    private val predictionWindowMillis = 2500L
+    private val minConfidence = 0.75f
+    private var lastStableGesture: String? = null
+    private var candidateGesture: String? = null
+    private var candidateStartTime: Long = 0L
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -98,6 +111,7 @@ class CameraService : LifecycleService() {
 
         // Initialize components in sequence
         initializeHandLandmarker()
+        initializeGestureClassifier()
         bindOverlayService()
 
         // Small delay to ensure overlay service is bound
@@ -348,12 +362,90 @@ class CameraService : LifecycleService() {
                         val distance = calculateDistance(indexTip, thumbTip)
                         detectAndHandlePinch(distance)
                     }
+
+                    // Run gesture classification using landmarks -> feature vector
+                    runGestureClassification(landmarks)
                 } catch (e: Exception) {
                     Log.e("CameraService", "UI update failed: ${e.message}", e)
                 }
             }
         } catch (e: Exception) {
             Log.e("CameraService", "Hand result processing error: ${e.message}", e)
+        }
+    }
+
+    private fun runGestureClassification(landmarks: List<NormalizedLandmark>) {
+        try {
+            val interpreter = gestureInterpreter ?: return
+            if (landmarks.size < 21) return
+            val feature = FloatArray(42)
+            var idx = 0
+            val baseX = landmarks[0].x()
+            val baseY = landmarks[0].y()
+            for (i in 0 until 21) {
+                feature[idx++] = landmarks[i].x() - baseX
+                feature[idx++] = landmarks[i].y() - baseY
+            }
+
+            val inputBuffer = java.nio.ByteBuffer.allocateDirect(4 * feature.size).order(java.nio.ByteOrder.nativeOrder())
+            for (v in feature) inputBuffer.putFloat(v)
+            inputBuffer.rewind()
+
+            val outputBuffer = java.nio.ByteBuffer.allocateDirect(4 * gestureLabels.size).order(java.nio.ByteOrder.nativeOrder())
+            outputBuffer.rewind()
+
+            interpreter.run(inputBuffer, outputBuffer)
+            outputBuffer.rewind()
+            val probs = FloatArray(gestureLabels.size)
+            for (i in probs.indices) probs[i] = outputBuffer.float
+
+            val (bestIdx, bestConf) = probs.withIndex().maxByOrNull { it.value }?.let { it.index to it.value } ?: (0 to 0f)
+            val bestLabel = gestureLabels.getOrNull(bestIdx) ?: return
+
+            // Confidence gating over time
+            val now = System.currentTimeMillis()
+            if (bestConf >= minConfidence) {
+                if (candidateGesture == bestLabel) {
+                    // continue window
+                    if (now - candidateStartTime >= predictionWindowMillis) {
+                        if (lastStableGesture != bestLabel) {
+                            lastStableGesture = bestLabel
+                            onStableGesture(bestLabel, bestConf)
+                        }
+                    }
+                } else {
+                    candidateGesture = bestLabel
+                    candidateStartTime = now
+                }
+            } else {
+                // reset if confidence dropped
+                if (candidateGesture == bestLabel) {
+                    candidateGesture = null
+                }
+            }
+        } catch (e: Exception) {
+            Log.w("CameraService", "Gesture classification failed: ${e.message}")
+        }
+    }
+
+    private fun onStableGesture(label: String, conf: Float) {
+        handler.post {
+            Toast.makeText(this, "Gesture: $label (${String.format("%.0f", conf * 100)}%)", Toast.LENGTH_SHORT).show()
+        }
+
+        when (label) {
+            "Open Palm" -> {
+                GestureAccessibilityService.instance?.takeScreenshotAndSave()
+            }
+            "OK" -> {
+                GestureAccessibilityService.instance?.dropLastScreenshot()
+            }
+            "Thumb Right", "Thumb-Right", "Thumbs Right", "thumbs-right" -> {
+                GestureAccessibilityService.instance?.swipeLeft() // swipe left to go to next page
+            }
+            "Thumb Left", "Thumb-Left", "Thumbs Left", "thumbs-left" -> {
+                GestureAccessibilityService.instance?.swipeRight() // swipe right to go to previous page
+            }
         }
     }
 
@@ -429,7 +521,6 @@ class CameraService : LifecycleService() {
     private fun initializeHandLandmarker() {
         try {
             Log.d("CameraService", "🤖 Initializing MediaPipe HandLandmarker...")
-
             val baseOptions = BaseOptions.builder()
                 .setModelAssetPath("hand_landmarker.task")
                 .setDelegate(Delegate.GPU)
@@ -452,6 +543,21 @@ class CameraService : LifecycleService() {
             Log.d("CameraService", "✅ HandLandmarker initialized successfully")
         } catch (e: Exception) {
             Log.e("CameraService", "❌ Failed to initialize HandLandmarker: ${e.message}", e)
+        }
+    }
+
+    private fun initializeGestureClassifier() {
+        try {
+            // Ensure the model filename matches your asset
+            val modelBuffer = FileUtil.loadMappedFile(this, "keypoint_classifier.tflite")
+            gestureInterpreter = Interpreter(modelBuffer)
+            // Optionally load labels from assets/labels.txt if present
+            try {
+                gestureLabels = FileUtil.loadLabels(this, "labels.txt")
+            } catch (_: Exception) { /* keep defaults */ }
+            Log.d("CameraService", "✅ Gesture classifier initialized")
+        } catch (e: Exception) {
+            Log.e("CameraService", "❌ Failed to init classifier: ${e.message}", e)
         }
     }
 

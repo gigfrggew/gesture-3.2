@@ -75,6 +75,7 @@ android {
 
     androidResources {
         noCompress += ".task"
+        noCompress += ".tflite"
     }
     
     packaging {
@@ -146,7 +147,6 @@ dependencies {
     implementation(libs.androidx.camera.view.v130)
 
     implementation(libs.tasks.vision.v020230731)
-    implementation(libs.tensorflow.lite)
 
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.coroutines.play.services)
@@ -155,4 +155,9 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+
+    // TensorFlow Lite runtime
+    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("org.tensorflow:tensorflow-lite-metadata:0.4.4")
 }
