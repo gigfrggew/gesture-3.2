@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <!-- POST_NOTIFICATIONS should be requested at runtime on Android 13+ -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- MediaProjection for screenshots on Android <13 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!-- Camera features -->
     <uses-feature android:name="android.hardware.camera" android:required="true" />

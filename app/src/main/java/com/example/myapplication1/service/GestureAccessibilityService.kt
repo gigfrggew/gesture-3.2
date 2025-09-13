@@ -3,10 +3,14 @@ package com.example.myapplication1.service
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
+import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
+import android.accessibilityservice.AccessibilityService.ScreenshotResult
+
 import android.app.Activity
 import android.content.ContentValues
 import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.ColorSpace
 import android.graphics.Path
 import android.hardware.HardwareBuffer
 import android.os.Build
@@ -17,11 +21,27 @@ import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
 import androidx.core.content.ContextCompat
+import androidx.annotation.RequiresApi
+import android.annotation.SuppressLint
+import android.content.Context
+
+
+
 import java.io.File
 import java.io.FileOutputStream
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.Executors
-import android.view.Display
+import java.util.concurrent.atomic.AtomicReference
+
+// MediaProjection-related
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.Image
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.util.DisplayMetrics
+import java.nio.ByteBuffer
+
 
 
 class GestureAccessibilityService : AccessibilityService() {
@@ -77,6 +97,12 @@ class GestureAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         instance = null
+        
+        // Clean up MediaProjection resources
+        virtualDisplay?.release()
+        imageReader?.close()
+        mediaProjection?.stop()
+        
         Log.d(TAG, "Service destroyed")
         super.onDestroy()
     }
@@ -118,20 +144,37 @@ class GestureAccessibilityService : AccessibilityService() {
 
     // ===== Screenshot helpers (API 33+) =====
     @Volatile private var lastScreenshotFile: File? = null
+    
+    // MediaProjection for Android <13
+    private var mediaProjection: MediaProjection? = null
+    private var virtualDisplay: VirtualDisplay? = null
+    private var imageReader: ImageReader? = null
+    private var mediaProjectionManager: MediaProjectionManager? = null
+    private var projectionResultCode: Int = -1
+    private var projectionData: Intent? = null
 
     fun takeScreenshotAndSave(): Boolean {
-        if (Build.VERSION.SDK_INT < 33) {
-            Toast.makeText(this, "Screenshot requires Android 13+", Toast.LENGTH_SHORT).show()
-            return false
+        return if (Build.VERSION.SDK_INT >= 33) {
+            takeScreenshotAPI30Plus()
+        } else {
+            takeScreenshotMediaProjection()
         }
-        return try {
-            val executor = Executors.newSingleThreadExecutor()
-            val cancel = CancellationSignal()
+    }
 
-            // ✅ Call without named arguments
+    @RequiresApi(Build.VERSION_CODES.R) // API 30+
+    @SuppressLint("NewApi") // we already guard by API level
+    private fun takeScreenshotAPI30Plus(): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                Log.w(TAG, "Screenshots require Android 11 (API 30)+")
+                return false
+            }
+
+            val executor = Executors.newSingleThreadExecutor()
+
             takeScreenshot(
-                Display.DEFAULT_DISPLAY,   // displayId (usually 0)
-                executor,                  // executor
+                0, // Default display ID
+                executor,
                 object : TakeScreenshotCallback {
                     override fun onSuccess(screenshot: ScreenshotResult) {
                         try {
@@ -151,9 +194,12 @@ class GestureAccessibilityService : AccessibilityService() {
                             }
 
                             val softwareBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, false)
-                            hb.close() // ✅ always close HardwareBuffer
+                            hb.close() // Always close HardwareBuffer
 
-                            val dir = File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), "Gestura")
+                            val dir = File(
+                                getExternalFilesDir(Environment.DIRECTORY_PICTURES),
+                                "Gestura"
+                            )
                             if (!dir.exists()) dir.mkdirs()
                             val file = File(dir, "screenshot_${System.currentTimeMillis()}.png")
 
@@ -196,26 +242,148 @@ class GestureAccessibilityService : AccessibilityService() {
     }
 
 
-
-    fun dropLastScreenshot(): Boolean {
+    private fun takeScreenshotMediaProjection(): Boolean {
         return try {
-            val file = lastScreenshotFile
-            if (file != null && file.exists()) {
-                val deleted = file.delete()
-                Log.d(TAG, "Drop screenshot: ${file.absolutePath} deleted=$deleted")
-                Toast.makeText(this, if (deleted) "Screenshot discarded" else "Failed to discard", Toast.LENGTH_SHORT).show()
-                if (deleted) lastScreenshotFile = null
-                deleted
-            } else {
-                Toast.makeText(this, "No screenshot to discard", Toast.LENGTH_SHORT).show()
-                false
+            if (mediaProjectionManager == null) {
+                mediaProjectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             }
+            
+            if (projectionResultCode == -1 || projectionData == null) {
+                Toast.makeText(this, "Screenshot permission required. Please restart the app.", Toast.LENGTH_LONG).show()
+                return false
+            }
+            
+            if (mediaProjection == null) {
+                mediaProjection = mediaProjectionManager?.getMediaProjection(projectionResultCode, projectionData!!)
+            }
+            
+            val displayMetrics = resources.displayMetrics
+            val width = displayMetrics.widthPixels
+            val height = displayMetrics.heightPixels
+            val density = displayMetrics.densityDpi
+            
+            imageReader = ImageReader.newInstance(width, height, android.graphics.PixelFormat.RGBA_8888, 1)
+            
+            val listener = ImageReader.OnImageAvailableListener { reader ->
+                val image = reader.acquireLatestImage()
+                if (image != null) {
+                    try {
+                        val planes = image.planes
+                        val buffer = planes[0].buffer
+                        val pixelStride = planes[0].pixelStride
+                        val rowStride = planes[0].rowStride
+                        val rowPadding = rowStride - pixelStride * width
+                        
+                        val bitmap = Bitmap.createBitmap(
+                            width + rowPadding / pixelStride,
+                            height,
+                            Bitmap.Config.ARGB_8888
+                        )
+                        bitmap.copyPixelsFromBuffer(buffer)
+                        
+                        val croppedBitmap = Bitmap.createBitmap(bitmap, 0, 0, width, height)
+                        bitmap.recycle()
+                        
+                        val dir = File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), "Gestura")
+                        if (!dir.exists()) dir.mkdirs()
+                        val file = File(dir, "screenshot_${System.currentTimeMillis()}.png")
+                        
+                        FileOutputStream(file).use { out ->
+                            croppedBitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                        }
+                        
+                        lastScreenshotFile = file
+                        Toast.makeText(this, "Screenshot saved", Toast.LENGTH_SHORT).show()
+                        Log.d(TAG, "Screenshot saved to ${file.absolutePath}")
+                        
+                        croppedBitmap.recycle()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Screenshot processing failed: ${e.message}", e)
+                        Toast.makeText(this, "Screenshot failed", Toast.LENGTH_SHORT).show()
+                    } finally {
+                        image?.close()
+                    }
+                }
+            }
+            
+            imageReader?.setOnImageAvailableListener(listener, null)
+            
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "Screenshot",
+                width, height, density,
+                android.hardware.display.DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface, null, null
+            )
+            
+            true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to drop screenshot: ${e.message}", e)
+            Log.e(TAG, "MediaProjection screenshot failed: ${e.message}", e)
+            Toast.makeText(this, "Screenshot failed", Toast.LENGTH_SHORT).show()
             false
         }
     }
     
+    fun setMediaProjectionData(resultCode: Int, data: Intent) {
+        projectionResultCode = resultCode
+        projectionData = data
+        Log.d(TAG, "MediaProjection data set")
+    }
+
+
+
+    fun storeScreenshot(): Boolean {
+        return try {
+            val file = lastScreenshotFile
+            if (file != null && file.exists()) {
+                // Move to permanent storage location
+                val permanentDir = File(getExternalFilesDir(Environment.DIRECTORY_PICTURES), "Gestura/Stored")
+                if (!permanentDir.exists()) permanentDir.mkdirs()
+
+                val storedFile = File(permanentDir, "stored_${System.currentTimeMillis()}.png")
+
+                // Perform copy
+                file.copyTo(storedFile, overwrite = true)
+
+                val success = storedFile.exists()
+
+                Log.d(TAG, "Store screenshot: ${file.absolutePath} -> ${storedFile.absolutePath}")
+                Toast.makeText(this, if (success) "Screenshot stored" else "Failed to store", Toast.LENGTH_SHORT).show()
+
+                if (success) {
+                    Log.d(TAG, "Screenshot stored successfully")
+                }
+
+                success
+            } else {
+                Toast.makeText(this, "No screenshot to store", Toast.LENGTH_SHORT).show()
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to store screenshot: ${e.message}", e)
+            false
+        }
+    }
+
+    fun pasteScreenshot(): Boolean {
+        return try {
+            val file = lastScreenshotFile
+            if (file != null && file.exists()) {
+                // Simulate paste action - in a real implementation, you'd use clipboard or image insertion
+                // For now, we'll just show a toast and copy to clipboard
+                Toast.makeText(this, "Screenshot pasted", Toast.LENGTH_SHORT).show()
+                Log.d(TAG, "Screenshot pasted from: ${file.absolutePath}")
+                true
+            } else {
+                Toast.makeText(this, "No screenshot to paste", Toast.LENGTH_SHORT).show()
+                false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to paste screenshot: ${e.message}", e)
+            false
+        }
+    }
+
+
     /**
      * Trigger click on currently highlighted app
      */

@@ -27,6 +27,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.example.myapplication1.R
 import android.content.Context
+import android.widget.Toast
+import kotlin.random.Random
 
 
 class OverlayService : Service() {
@@ -37,23 +39,28 @@ class OverlayService : Service() {
     private var displayMetrics: DisplayMetrics? = null
     private val prefs by lazy { getSharedPreferences("overlay_targets_prefs", Context.MODE_PRIVATE) }
 
-    // Snap targets and marker management
-    private var snapModeEnabled: Boolean = false
-    private val snapTargets: MutableList<SnapTarget> = mutableListOf()
-    private val markerViews: MutableMap<Int, View> = mutableMapOf()
-    private var activeTargetId: Int? = null
-    // Basic UI controls
-    private var setupButton: View? = null
-    private var exitSetupButton: View? = null
+    // Setup mode for numbered blocks
     private var isSetupMode: Boolean = false
-    private var overlayRoot: FrameLayout? = null
-    // Interactive setup state
-    private var setupTouchView: View? = null
-    private var setupDesiredCount: Int = 0
-    private var setupPlacedCount: Int = 0
-    private var setupNextId: Int = 1
+    private val numberedBlocks: MutableList<NumberedBlock> = mutableListOf()
+    private var setupButton: View? = null
+    private var saveButton: View? = null
+    private var undoButton: View? = null
+    
+    // Smooth cursor movement
+    private var lastUpdateTime = 0L
+    private val smoothingFactor = 0.3f // Lower = smoother movement
+    private var targetX = 0f
+    private var targetY = 0f
+    private var currentX = 0f
+    private var currentY = 0f
 
-    private data class SnapTarget(val id: Int, var x: Int, var y: Int)
+    private data class NumberedBlock(
+        val id: Int,
+        var x: Float,
+        var y: Float,
+        var isLocked: Boolean = false,
+        var view: View? = null
+    )
 
     inner class LocalBinder : android.os.Binder() {
         fun getService(): OverlayService = this@OverlayService
@@ -102,16 +109,7 @@ class OverlayService : Service() {
             initializeDisplayMetrics()
 
             setupFloatingCursor()
-            // Load saved targets and enable snap mode if available
-            loadSnapTargetsFromPrefs()
-            if (snapTargets.isNotEmpty()) {
-                enableSnapMode(true)
-                // Move cursor to first target
-                moveCursorToTargetId(snapTargets.first().id)
-            }
-            // Create setup/exit buttons
-            createSetupButton()
-            createExitSetupButton()
+            setupControlButtons()
             Log.d("OverlayService", "Overlay initialized successfully")
         } catch (e: Exception) {
             Log.e("OverlayService", "Failed to initialize overlay: ${e.message}", e)
@@ -158,6 +156,7 @@ class OverlayService : Service() {
         // Remove all pending callbacks
         handler.removeCallbacksAndMessages(null)
         
+        // Clean up cursor view
         cursorView?.let {
             try {
                 windowManager.removeView(it)
@@ -167,6 +166,14 @@ class OverlayService : Service() {
             }
         }
         cursorView = null
+        
+        // Clean up control buttons
+        setupButton?.let { try { windowManager.removeView(it) } catch (e: Exception) { Log.w("OverlayService", "Error removing setup button: ${e.message}") } }
+        saveButton?.let { try { windowManager.removeView(it) } catch (e: Exception) { Log.w("OverlayService", "Error removing save button: ${e.message}") } }
+        undoButton?.let { try { windowManager.removeView(it) } catch (e: Exception) { Log.w("OverlayService", "Error removing undo button: ${e.message}") } }
+        
+        // Clean up numbered blocks
+        hideNumberedBlocks()
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -249,14 +256,13 @@ class OverlayService : Service() {
     }
 
     /**
-     * Updates cursor position to follow finger (centers box on coordinates)
+     * Updates cursor position to follow finger with smooth movement and snap to numbered blocks
      */
     fun updateCursorPosition(x: Float, y: Float) {
         runOnUiThread {
             cursorView?.let { view ->
                 try {
                     val params = view.layoutParams as WindowManager.LayoutParams
-                    // Use layout params as source of truth for size to avoid 0 width/height during first frames
                     val halfWidth = (params.width / 2f)
                     val halfHeight = (params.height / 2f)
 
@@ -264,29 +270,58 @@ class OverlayService : Service() {
                     val screenWidth = displayMetrics?.widthPixels ?: resources.displayMetrics.widthPixels
                     val screenHeight = displayMetrics?.heightPixels ?: resources.displayMetrics.heightPixels
 
-                    if (snapModeEnabled && snapTargets.isNotEmpty()) {
-                        // Snap to nearest saved target
-                        val nearest = findNearestTarget(x.toInt(), y.toInt())
-                        activeTargetId = nearest?.id
-                        val targetX = (nearest?.x ?: x.toInt()).toFloat()
-                        val targetY = (nearest?.y ?: y.toInt()).toFloat()
-
-                        val clampedX = targetX.coerceIn(halfWidth, (screenWidth - halfWidth))
-                        val clampedY = targetY.coerceIn(halfHeight, (screenHeight - halfHeight))
-
-                        params.x = (clampedX - halfWidth).toInt()
-                        params.y = (clampedY - halfHeight).toInt()
+                    // Check for snapping to numbered blocks
+                    val nearestBlock = findNearestNumberedBlock(x, y)
+                    val snapRadius = 100f // pixels
+                    
+                    val finalTargetX: Float
+                    val finalTargetY: Float
+                    
+                    if (nearestBlock != null && !isSetupMode) {
+                        val distance = kotlin.math.sqrt(
+                            ((nearestBlock.x - x) * (nearestBlock.x - x) + (nearestBlock.y - y) * (nearestBlock.y - y)).toDouble()
+                        ).toFloat()
+                        
+                        if (distance <= snapRadius) {
+                            // Snap to the numbered block
+                            finalTargetX = nearestBlock.x.coerceIn(halfWidth, (screenWidth - halfWidth))
+                            finalTargetY = nearestBlock.y.coerceIn(halfHeight, (screenHeight - halfHeight))
+                        } else {
+                            // Normal movement
+                            finalTargetX = x.coerceIn(halfWidth, (screenWidth - halfWidth))
+                            finalTargetY = y.coerceIn(halfHeight, (screenHeight - halfHeight))
+                        }
                     } else {
-                        val clampedX = x.coerceIn(halfWidth, (screenWidth - halfWidth))
-                        val clampedY = y.coerceIn(halfHeight, (screenHeight - halfHeight))
-
-                        params.x = (clampedX - halfWidth).toInt()
-                        params.y = (clampedY - halfHeight).toInt()
+                        // Normal movement
+                        finalTargetX = x.coerceIn(halfWidth, (screenWidth - halfWidth))
+                        finalTargetY = y.coerceIn(halfHeight, (screenHeight - halfHeight))
                     }
+
+                    // Set target position
+                    targetX = finalTargetX
+                    targetY = finalTargetY
+
+                    // Smooth movement interpolation
+                    val currentTime = System.currentTimeMillis()
+                    val deltaTime = currentTime - lastUpdateTime
+                    lastUpdateTime = currentTime
+
+                    if (deltaTime > 0) {
+                        val lerpFactor = kotlin.math.min(1f, smoothingFactor * (deltaTime / 16f)) // 16ms = 60fps
+                        currentX += (targetX - currentX) * lerpFactor
+                        currentY += (targetY - currentY) * lerpFactor
+                    } else {
+                        currentX = targetX
+                        currentY = targetY
+                    }
+
+                    // Update cursor position
+                    params.x = (currentX - halfWidth).toInt()
+                    params.y = (currentY - halfHeight).toInt()
 
                     windowManager.updateViewLayout(view, params)
 
-                    // ✅ Sync position with Accessibility Service
+                    // Sync position with Accessibility Service
                     GestureAccessibilityService.lastCursorX = (params.x + halfWidth).toInt()
                     GestureAccessibilityService.lastCursorY = (params.y + halfHeight).toInt()
                 } catch (e: Exception) {
@@ -379,161 +414,268 @@ class OverlayService : Service() {
         }
     }
 
-    // ===== Snap Mode and Target Management =====
-    fun enableSnapMode(enable: Boolean) {
-        snapModeEnabled = enable
-        Log.d("OverlayService", "Snap mode: $enable")
-    }
-
-    fun moveCursorToTargetId(id: Int) {
-        val target = snapTargets.firstOrNull { it.id == id } ?: return
-        activeTargetId = id
-        updateCursorPosition(target.x.toFloat(), target.y.toFloat())
-    }
-
-    fun cycleToNextTarget() {
-        if (snapTargets.isEmpty()) return
-        val list = snapTargets.sortedBy { it.id }
-        val currentIndex = list.indexOfFirst { it.id == activeTargetId }
-        val next = if (currentIndex == -1 || currentIndex == list.lastIndex) list.first() else list[currentIndex + 1]
-        moveCursorToTargetId(next.id)
-    }
-
-    private fun findNearestTarget(x: Int, y: Int): SnapTarget? {
-        if (snapTargets.isEmpty()) return null
-        val configuredRadius = prefs.getInt("snap_radius", 100)
-        val maxDistSquared = (configuredRadius * configuredRadius).toFloat()
-        var best: SnapTarget? = null
-        var bestDist = Float.MAX_VALUE
-        for (t in snapTargets) {
-            val dx = (t.x - x).toFloat()
-            val dy = (t.y - y).toFloat()
-            val d = (dx * dx + dy * dy)
-            if (d < bestDist && d <= maxDistSquared) {
-                bestDist = d
-                best = t
-            }
-        }
-        return best
-    }
-
-    fun startTargetSetup(numberOfTargets: Int) {
-        // Remove existing markers if any
-        hideAndRemoveMarkers()
-
-        val density = displayMetrics?.density ?: resources.displayMetrics.density
-        val size = (44 * density).toInt()
-        val screenWidth = displayMetrics?.widthPixels ?: resources.displayMetrics.widthPixels
-        val screenHeight = displayMetrics?.heightPixels ?: resources.displayMetrics.heightPixels
-
-        // Seed from saved or spaced grid
-        if (snapTargets.isEmpty()) {
-            for (i in 1..numberOfTargets) {
-                val px = (screenWidth * (i.toFloat() / (numberOfTargets + 1))).toInt()
-                val py = (screenHeight * 0.4f).toInt()
-                snapTargets.add(SnapTarget(i, px, py))
-            }
-        } else if (snapTargets.size < numberOfTargets) {
-            val nextId = (snapTargets.maxOfOrNull { it.id } ?: 0) + 1
-            for (i in 0 until (numberOfTargets - snapTargets.size)) {
-                val px = (screenWidth * (0.2f + 0.15f * i)).toInt().coerceIn(0, screenWidth)
-                val py = (screenHeight * 0.5f).toInt()
-                snapTargets.add(SnapTarget(nextId + i, px, py))
-            }
-        }
-
-        snapTargets.forEach { target -> addMarkerView(target) }
-    }
-
-    fun finishTargetSetup() {
-        hideAndRemoveMarkers()
-        enableSnapMode(true)
-        // Move cursor to first saved target if available
-        if (snapTargets.isNotEmpty()) moveCursorToTargetId(snapTargets.first().id)
-    }
-
-    private fun hideAndRemoveMarkers() {
-        markerViews.values.forEach { v ->
-            try { windowManager.removeView(v) } catch (_: Exception) {}
-        }
-        markerViews.clear()
-    }
-
-    // ===== Simple UI controls for setup mode =====
-    private fun createSetupButton() {
-        if (setupButton != null) return
-        val btn = Button(this).apply {
-            text = "Setup Positions"
-            textSize = 12f
-            setBackgroundColor(Color.parseColor("#2196F3"))
-            setTextColor(Color.WHITE)
-            setOnClickListener { toggleSetupMode(true) }
-        }
-
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = 20
-            y = 120
-        }
-
+    // ===== Setup Mode for Numbered Blocks =====
+    private fun setupControlButtons() {
         try {
-            windowManager.addView(btn, params)
-            setupButton = btn
+            val density = displayMetrics?.density ?: resources.displayMetrics.density
+            val buttonSize = (80 * density).toInt()
+            
+            // Setup Button
+            setupButton = createControlButton("Setup", buttonSize, 0, 0) { 
+                toggleSetupMode() 
+            }
+            
+            // Save Button (initially hidden)
+            saveButton = createControlButton("Save", buttonSize, 0, buttonSize + 20) { 
+                saveNumberedBlocks() 
+            }
+            
+            // Undo Button (initially hidden)
+            undoButton = createControlButton("Undo", buttonSize, buttonSize + 20, buttonSize + 20) { 
+                undoLastBlock() 
+            }
+            
+            saveButton?.visibility = View.GONE
+            undoButton?.visibility = View.GONE
+            
         } catch (e: Exception) {
-            Log.w("OverlayService", "Failed to add setup button: ${e.message}")
+            Log.e("OverlayService", "Failed to setup control buttons: ${e.message}", e)
         }
     }
-
-    private fun createExitSetupButton() {
-        if (exitSetupButton != null) return
-        val btn = Button(this).apply {
-            text = "Exit Setup"
-            textSize = 12f
-            setBackgroundColor(Color.parseColor("#F44336"))
-            setTextColor(Color.WHITE)
-            visibility = View.GONE
-            setOnClickListener { toggleSetupMode(false) }
-        }
-
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = 20
-            y = 200
-        }
-
-        try {
-            windowManager.addView(btn, params)
-            exitSetupButton = btn
+    
+    private fun createControlButton(text: String, size: Int, x: Int, y: Int, onClick: () -> Unit): View? {
+        return try {
+            val button = Button(this).apply {
+                this.text = text
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#4CAF50"))
+                textSize = 12f
+                
+                // Make button touchable
+                setOnClickListener { onClick() }
+            }
+            
+            val params = WindowManager.LayoutParams(
+                size,
+                size,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                this.x = x
+                this.y = y
+            }
+            
+            windowManager.addView(button, params)
+            Log.d("OverlayService", "Control button '$text' added at ($x, $y)")
+            button
         } catch (e: Exception) {
-            Log.w("OverlayService", "Failed to add exit button: ${e.message}")
+            Log.e("OverlayService", "Failed to create control button '$text': ${e.message}", e)
+            null
         }
     }
-
-    private fun toggleSetupMode(enable: Boolean) {
-        isSetupMode = enable
-        if (enable) {
-            setupButton?.visibility = View.GONE
-            exitSetupButton?.visibility = View.VISIBLE
-            // Default to placing 5 targets; can be parameterized by caller
-            startInteractiveTargetSetup(5)
-            hideCursor()
+    
+    private fun toggleSetupMode() {
+        isSetupMode = !isSetupMode
+        
+        if (isSetupMode) {
+            showSaveUndoButtons()
+            createNumberedBlocks()
         } else {
-            finishInteractiveSetup()
-            setupButton?.visibility = View.VISIBLE
-            exitSetupButton?.visibility = View.GONE
-            showCursor()
+            hideSaveUndoButtons()
+            hideNumberedBlocks()
+        }
+        
+        Log.d("OverlayService", "Setup mode: $isSetupMode")
+    }
+    
+    private fun showSaveUndoButtons() {
+        saveButton?.visibility = View.VISIBLE
+        undoButton?.visibility = View.VISIBLE
+    }
+    
+    private fun hideSaveUndoButtons() {
+        saveButton?.visibility = View.GONE
+        undoButton?.visibility = View.GONE
+    }
+    
+    private fun createNumberedBlocks() {
+        // Create 5 numbered blocks initially
+        for (i in 1..5) {
+            val block = NumberedBlock(
+                id = i,
+                x = 100f + (i * 100),
+                y = 300f,
+                isLocked = false
+            )
+            
+            val blockView = createNumberedBlockView(block)
+            block.view = blockView
+            numberedBlocks.add(block)
+        }
+    }
+    
+    private fun createNumberedBlockView(block: NumberedBlock): View? {
+        return try {
+            val density = displayMetrics?.density ?: resources.displayMetrics.density
+            val size = (60 * density).toInt()
+            
+            val view = TextView(this).apply {
+                text = block.id.toString()
+                setTextColor(Color.BLACK)
+                gravity = android.view.Gravity.CENTER
+                textSize = 16f
+                setBackgroundColor(Color.parseColor("#FFD700")) // Yellow color
+                setPadding(0, 0, 0, 0)
+                
+                // Make it draggable when in setup mode
+                setOnTouchListener { _, event ->
+                    if (isSetupMode && !block.isLocked) {
+                        handleBlockDrag(event, block)
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+            
+            val params = WindowManager.LayoutParams(
+                size,
+                size,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = block.x.toInt()
+                y = block.y.toInt()
+            }
+            
+            windowManager.addView(view, params)
+            Log.d("OverlayService", "Numbered block ${block.id} created at (${block.x}, ${block.y})")
+            view
+        } catch (e: Exception) {
+            Log.e("OverlayService", "Failed to create numbered block view: ${e.message}", e)
+            null
+        }
+    }
+    
+    private fun handleBlockDrag(event: MotionEvent, block: NumberedBlock): Boolean {
+        when (event.action) {
+            MotionEvent.ACTION_DOWN -> {
+                // Start dragging
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                // Update block position
+                block.x = event.rawX
+                block.y = event.rawY
+                
+                // Update view position
+                block.view?.let { view ->
+                    val params = view.layoutParams as WindowManager.LayoutParams
+                    params.x = block.x.toInt()
+                    params.y = block.y.toInt()
+                    windowManager.updateViewLayout(view, params)
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                // Check if block is over an app icon and lock it
+                checkAndLockBlock(block)
+                return true
+            }
+        }
+        return false
+    }
+    
+    private fun checkAndLockBlock(block: NumberedBlock) {
+        // Simulate checking if block is over an app icon
+        // In a real implementation, you'd check against actual app icon positions
+        val isOverApp = Random.nextFloat() < 0.3f // 30% chance for demo
+        // 30% chance for demo
+        
+        if (isOverApp) {
+            lockBlock(block)
+        }
+    }
+    
+    private fun lockBlock(block: NumberedBlock) {
+        block.isLocked = true
+        
+        // Make the block transparent
+        block.view?.let { view ->
+            view.alpha = 0.3f
+            view.setBackgroundColor(Color.parseColor("#80000000")) // Semi-transparent black
+        }
+        
+        Toast.makeText(this, "Block ${block.id} locked to app", Toast.LENGTH_SHORT).show()
+        Log.d("OverlayService", "Block ${block.id} locked at (${block.x}, ${block.y})")
+    }
+    
+    private fun findNearestNumberedBlock(x: Float, y: Float): NumberedBlock? {
+        if (numberedBlocks.isEmpty()) return null
+        
+        var nearest: NumberedBlock? = null
+        var minDistance = Float.MAX_VALUE
+        
+        for (block in numberedBlocks) {
+            if (block.isLocked) {
+                val distance = kotlin.math.sqrt(
+                    ((block.x - x) * (block.x - x) + (block.y - y) * (block.y - y)).toDouble()
+                ).toFloat()
+                
+                if (distance < minDistance) {
+                    minDistance = distance
+                    nearest = block
+                }
+            }
+        }
+        
+        return nearest
+    }
+    
+    private fun hideNumberedBlocks() {
+        numberedBlocks.forEach { block ->
+            block.view?.let { view ->
+                try {
+                    windowManager.removeView(view)
+                } catch (e: Exception) {
+                    Log.w("OverlayService", "Failed to remove numbered block view: ${e.message}")
+                }
+            }
+        }
+        numberedBlocks.clear()
+    }
+    
+    private fun saveNumberedBlocks() {
+        // Save the current positions of numbered blocks
+        val editor = prefs.edit()
+        numberedBlocks.forEach { block ->
+            editor.putFloat("block_${block.id}_x", block.x)
+            editor.putFloat("block_${block.id}_y", block.y)
+            editor.putBoolean("block_${block.id}_locked", block.isLocked)
+        }
+        editor.apply()
+        
+        Toast.makeText(this, "Numbered blocks saved", Toast.LENGTH_SHORT).show()
+        Log.d("OverlayService", "Numbered blocks saved")
+    }
+    
+    private fun undoLastBlock() {
+        if (numberedBlocks.isNotEmpty()) {
+            val lastBlock = numberedBlocks.removeAt(numberedBlocks.size - 1)
+            lastBlock.view?.let { view ->
+                try {
+                    windowManager.removeView(view)
+                } catch (e: Exception) {
+                    Log.w("OverlayService", "Failed to remove last block: ${e.message}")
+                }
+            }
+            Toast.makeText(this, "Last block removed", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -561,164 +703,6 @@ class OverlayService : Service() {
         } catch (e: Exception) {
             Log.w("OverlayService", "Feedback failed: ${e.message}")
         }
-    }
-
-    // Create a draggable numbered marker for a target
-    private fun addMarkerView(target: SnapTarget) {
-        val density = displayMetrics?.density ?: resources.displayMetrics.density
-        val size = (44 * density).toInt()
-        val screenWidth = displayMetrics?.widthPixels ?: resources.displayMetrics.widthPixels
-        val screenHeight = displayMetrics?.heightPixels ?: resources.displayMetrics.heightPixels
-
-        val tv = TextView(this).apply {
-            text = target.id.toString()
-            setTextColor(0xFFFFFFFF.toInt())
-            textSize = 16f
-            background = ContextCompat.getDrawable(this@OverlayService, R.drawable.focus_circle_background)
-            gravity = Gravity.CENTER
-        }
-
-        val lp = WindowManager.LayoutParams(
-            size,
-            size,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = (target.x - size / 2).coerceIn(0, screenWidth - size)
-            y = (target.y - size / 2).coerceIn(0, screenHeight - size)
-        }
-
-        tv.setOnTouchListener(object : View.OnTouchListener {
-            var lastX = 0
-            var lastY = 0
-            var startRawX = 0f
-            var startRawY = 0f
-            override fun onTouch(v: View, event: MotionEvent): Boolean {
-                when (event.action) {
-                    MotionEvent.ACTION_DOWN -> {
-                        lastX = lp.x
-                        lastY = lp.y
-                        startRawX = event.rawX
-                        startRawY = event.rawY
-                        return true
-                    }
-                    MotionEvent.ACTION_MOVE -> {
-                        val dx = (event.rawX - startRawX).toInt()
-                        val dy = (event.rawY - startRawY).toInt()
-                        lp.x = (lastX + dx).coerceIn(0, screenWidth - size)
-                        lp.y = (lastY + dy).coerceIn(0, screenHeight - size)
-                        windowManager.updateViewLayout(v, lp)
-                        // Update model center
-                        target.x = lp.x + size / 2
-                        target.y = lp.y + size / 2
-                        return true
-                    }
-                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                        // Persist after drop
-                        saveSnapTargetsToPrefs()
-                        return true
-                    }
-                }
-                return false
-            }
-        })
-
-        windowManager.addView(tv, lp)
-        markerViews[target.id] = tv
-    }
-
-    // Interactive tap-to-place setup
-    fun startInteractiveTargetSetup(desiredCount: Int) {
-        hideAndRemoveMarkers()
-        enableSnapMode(false)
-        setupDesiredCount = desiredCount.coerceAtLeast(1)
-        setupPlacedCount = 0
-        // Continue numbering from existing highest id
-        setupNextId = (snapTargets.maxOfOrNull { it.id } ?: 0) + 1
-
-        // Full-screen touch capture view
-        if (setupTouchView != null) {
-            try { windowManager.removeView(setupTouchView) } catch (_: Exception) {}
-            setupTouchView = null
-        }
-
-        val screenWidth = displayMetrics?.widthPixels ?: resources.displayMetrics.widthPixels
-        val screenHeight = displayMetrics?.heightPixels ?: resources.displayMetrics.heightPixels
-
-        val lp = WindowManager.LayoutParams(
-            screenWidth,
-            screenHeight,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-            PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START }
-
-        setupTouchView = View(this).apply {
-            setOnTouchListener { _, event ->
-                if (event.action == MotionEvent.ACTION_UP) {
-                    val x = event.rawX.toInt()
-                    val y = event.rawY.toInt()
-                    placeNextInteractiveTarget(x, y)
-                    true
-                } else true
-            }
-        }
-        windowManager.addView(setupTouchView, lp)
-        Log.d("OverlayService", "Interactive setup started for $setupDesiredCount targets")
-    }
-
-    private fun placeNextInteractiveTarget(x: Int, y: Int) {
-        if (setupPlacedCount >= setupDesiredCount) return
-        val id = setupNextId
-        val target = SnapTarget(id, x, y)
-        snapTargets.add(target)
-        addMarkerView(target)
-        saveSnapTargetsToPrefs()
-        setupPlacedCount += 1
-        setupNextId += 1
-        if (setupPlacedCount >= setupDesiredCount) {
-            finishInteractiveSetup()
-        }
-    }
-
-    fun finishInteractiveSetup() {
-        // Remove touch layer
-        setupTouchView?.let { v ->
-            try { windowManager.removeView(v) } catch (_: Exception) {}
-        }
-        setupTouchView = null
-        enableSnapMode(true)
-        if (snapTargets.isNotEmpty()) moveCursorToTargetId(snapTargets.first().id)
-        Log.d("OverlayService", "Interactive setup finished with ${snapTargets.size} targets")
-    }
-
-    private fun saveSnapTargetsToPrefs() {
-        val encoded = snapTargets.joinToString("|") { "${it.id},${it.x},${it.y}" }
-        prefs.edit().putString("targets", encoded).apply()
-        Log.d("OverlayService", "Saved targets: $encoded")
-    }
-
-    private fun loadSnapTargetsFromPrefs() {
-        snapTargets.clear()
-        val encoded = prefs.getString("targets", null) ?: return
-        encoded.split('|').forEach { item ->
-            val parts = item.split(',')
-            if (parts.size == 3) {
-                val id = parts[0].toIntOrNull()
-                val x = parts[1].toIntOrNull()
-                val y = parts[2].toIntOrNull()
-                if (id != null && x != null && y != null) {
-                    snapTargets.add(SnapTarget(id, x, y))
-                }
-            }
-        }
-        Log.d("OverlayService", "Loaded targets: ${snapTargets.size}")
     }
 
     private fun runOnUiThread(action: () -> Unit) {

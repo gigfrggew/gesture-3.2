@@ -43,6 +43,7 @@ class MainActivity : ComponentActivity() {
     private var hasCameraPermission by mutableStateOf(false)
     private var hasAccessibilityPermission by mutableStateOf(false)
     private var hasNotificationPermission by mutableStateOf(false)
+    private var isServiceRunning by mutableStateOf(false)
 
     // Track if receiver was registered so unregister doesn't throw
     private var isReceiverRegistered = false
@@ -77,14 +78,27 @@ class MainActivity : ComponentActivity() {
 
     private val serviceStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == "com.example.myapplication1.CAMERA_SERVICE_STATUS") {
-                val started = intent.getBooleanExtra("started", false)
-                if (!started) {
+            when (intent.action) {
+                "com.example.myapplication1.CAMERA_SERVICE_STATUS" -> {
+                    val started = intent.getBooleanExtra("started", false)
+                    isServiceRunning = started
+                    if (!started) {
+                        runOnUiThread {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Camera service failed. Is the camera in use by another app?",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                    }
+                }
+                "com.example.myapplication1.SERVICE_STOPPED" -> {
+                    isServiceRunning = false
                     runOnUiThread {
                         Toast.makeText(
                             this@MainActivity,
-                            "Camera service failed. Is the camera in use by another app?",
-                            Toast.LENGTH_LONG
+                            "Gestura service stopped",
+                            Toast.LENGTH_SHORT
                         ).show()
                     }
                 }
@@ -133,7 +147,10 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private fun registerServiceStatusReceiver() {
         try {
-            val filter = IntentFilter("com.example.myapplication1.CAMERA_SERVICE_STATUS")
+            val filter = IntentFilter().apply {
+                addAction("com.example.myapplication1.CAMERA_SERVICE_STATUS")
+                addAction("com.example.myapplication1.SERVICE_STOPPED")
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 registerReceiver(serviceStatusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
             } else {
@@ -272,6 +289,7 @@ class MainActivity : ComponentActivity() {
                     Log.d("MainActivity", "CameraService start requested")
                     
                     Toast.makeText(this@MainActivity, "Gestura service started!", Toast.LENGTH_SHORT).show()
+                    isServiceRunning = true
 
                     // Transition to Home so gesture browsing starts over the launcher
                     GestureAccessibilityService.instance?.goHome()
@@ -284,6 +302,27 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             Log.e("MainActivity", "Failed to start services", e)
             Toast.makeText(this, "Failed to start services. Please try again.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun stopServices() {
+        try {
+            Log.d("MainActivity", "Stopping services...")
+            
+            // Stop CameraService
+            val cameraIntent = Intent(this, CameraService::class.java)
+            stopService(cameraIntent)
+            
+            // Stop OverlayService
+            val overlayIntent = Intent(this, OverlayService::class.java)
+            stopService(overlayIntent)
+            
+            isServiceRunning = false
+            Toast.makeText(this, "Gestura service stopped!", Toast.LENGTH_SHORT).show()
+            
+        } catch (e: Exception) {
+            Log.e("MainActivity", "Failed to stop services", e)
+            Toast.makeText(this, "Failed to stop services. Please try again.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -326,11 +365,18 @@ class MainActivity : ComponentActivity() {
 
             Spacer(modifier = Modifier.height(32.dp))
             Button(
-                onClick = { startServices() },
+                onClick = { if (isServiceRunning) stopServices() else startServices() },
                 enabled = allGranted,
                 modifier = Modifier.fillMaxWidth().height(56.dp)
             ) {
-                Text(if (allGranted) "Start Gesture Control" else "Grant All Permissions", fontSize = 16.sp)
+                Text(
+                    text = when {
+                        !allGranted -> "Grant All Permissions"
+                        isServiceRunning -> "Stop Gesture Control"
+                        else -> "Start Gesture Control"
+                    },
+                    fontSize = 16.sp
+                )
             }
         }
     }

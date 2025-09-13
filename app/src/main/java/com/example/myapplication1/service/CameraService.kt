@@ -133,6 +133,9 @@ class CameraService : LifecycleService() {
             cameraExecutor.shutdownNow()
             cameraProvider?.unbindAll()
             handLandmarker?.close()
+            // Clean up TFLite interpreter
+            gestureInterpreter?.close()
+            gestureInterpreter = null
         } catch (e: Exception) {
             Log.w("CameraService", "Cleanup warning: ${e.message}")
         }
@@ -143,6 +146,14 @@ class CameraService : LifecycleService() {
             } catch (e: Exception) {
                 Log.w("CameraService", "Unbind warning: ${e.message}")
             }
+        }
+
+        // Send broadcast that service stopped
+        try {
+            val intent = Intent("com.example.myapplication1.SERVICE_STOPPED")
+            sendBroadcast(intent)
+        } catch (e: Exception) {
+            Log.w("CameraService", "Failed to send stop broadcast: ${e.message}")
         }
 
         Log.d("CameraService", "✅ CameraService destroyed")
@@ -435,16 +446,20 @@ class CameraService : LifecycleService() {
 
         when (label) {
             "Open Palm" -> {
+                // Open Palm -> Capture Screenshot
                 GestureAccessibilityService.instance?.takeScreenshotAndSave()
             }
             "OK" -> {
-                GestureAccessibilityService.instance?.dropLastScreenshot()
+                // OK Symbol -> Paste the captured screenshot
+                GestureAccessibilityService.instance?.pasteScreenshot()
             }
             "Thumb Right", "Thumb-Right", "Thumbs Right", "thumbs-right" -> {
-                GestureAccessibilityService.instance?.swipeLeft() // swipe left to go to next page
+                // Thumb Right -> Swipe to next page
+                GestureAccessibilityService.instance?.swipeRight()
             }
             "Thumb Left", "Thumb-Left", "Thumbs Left", "thumbs-left" -> {
-                GestureAccessibilityService.instance?.swipeRight() // swipe right to go to previous page
+                // Thumb Left -> Swipe to previous page
+                GestureAccessibilityService.instance?.swipeLeft()
             }
         }
     }
@@ -548,9 +563,19 @@ class CameraService : LifecycleService() {
 
     private fun initializeGestureClassifier() {
         try {
+            // Clean up any existing interpreter first
+            gestureInterpreter?.close()
+            gestureInterpreter = null
+            
             // Ensure the model filename matches your asset
             val modelBuffer = FileUtil.loadMappedFile(this, "keypoint_classifier.tflite")
             gestureInterpreter = Interpreter(modelBuffer)
+            
+            // Reset gesture state
+            lastStableGesture = null
+            candidateGesture = null
+            candidateStartTime = 0L
+            
             // Optionally load labels from assets/labels.txt if present
             try {
                 gestureLabels = FileUtil.loadLabels(this, "labels.txt")
@@ -558,6 +583,7 @@ class CameraService : LifecycleService() {
             Log.d("CameraService", "✅ Gesture classifier initialized")
         } catch (e: Exception) {
             Log.e("CameraService", "❌ Failed to init classifier: ${e.message}", e)
+            gestureInterpreter = null
         }
     }
 
